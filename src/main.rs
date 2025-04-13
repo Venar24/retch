@@ -1,6 +1,21 @@
 use sysinfo::System;
 use battery::{Manager, State};
+use std::fs;
 
+fn get_linux_distribution() -> Option<String> {
+    if let Ok(content) = fs::read_to_string("/etc/os-release") {
+        for line in content.lines() {
+            if line.starts_with("PRETTY_NAME=") {
+                return Some(
+                    line.trim_start_matches("PRETTY_NAME=")
+                        .trim_matches('"')
+                        .to_string()
+                );
+            }
+        }
+    }
+    None
+}
 // Define the battery function outside of main
 fn get_battery_info() -> Result<String, Box<dyn std::error::Error>> {
     // Initialize battery manager
@@ -79,10 +94,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get battery information
     let battery_info = get_battery_info()?;
     
+// Get OS Info
+let os_info = if cfg!(target_os = "linux") {
+    get_linux_distribution().unwrap_or("Linux (Unknown Distro)".to_string())
+} else if cfg!(target_os = "windows") {
+    "Windows".to_string()
+} else if cfg!(target_os = "macos") {
+    "macOS".to_string()
+} else {
+    "Unknown OS".to_string()
+};
+
+
     println!("OS: {}
 Ram: {} Gb
 {}",
-        std::env::consts::OS,
+        os_info,
         total_memory_gb,
         battery_info
     );
