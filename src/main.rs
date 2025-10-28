@@ -1,7 +1,10 @@
-use sysinfo::System;
 use battery::{Manager, State};
 use std::fs;
+use sysinfo::System;
+use toml::Value;
 
+/// Attempt to read the human-friendly distribution name from `/etc/os-release`.
+/// Falls back to `None` when the information is unavailable.
 fn get_linux_distribution() -> Option<String> {
     if let Ok(content) = fs::read_to_string("/etc/os-release") {
         for line in content.lines() {
@@ -16,7 +19,9 @@ fn get_linux_distribution() -> Option<String> {
     }
     None
 }
-// Define the battery function outside of main
+
+/// Compose a one-line summary of the first detected battery, including charge,
+/// state, and an ETA if the driver exposes it.
 fn get_battery_info() -> Result<String, Box<dyn std::error::Error>> {
     // Initialize battery manager
     let manager = Manager::new()?;
@@ -72,47 +77,86 @@ fn get_battery_info() -> Result<String, Box<dyn std::error::Error>> {
     Ok("Battery: Not detected".to_string())
 }
 
+/// Convert the total physical memory reported in bytes to whole gigabytes.
+fn get_total_memory_gb(system: &System) -> u64 {
+    let total_memory_bt = system.total_memory();
+    let total_memory_kb = total_memory_bt / 1024;
+    let total_memory_mb = total_memory_kb / 1024;
+    total_memory_mb / 1024
+}
+
+/// Format a concise uptime string in the form `Xd Xh Xm`.
+fn format_uptime() -> String {
+    let uptime_seconds = System::uptime();
+    let days = uptime_seconds / 86_400;
+    let hours = (uptime_seconds % 86_400) / 3_600;
+    let minutes = (uptime_seconds % 3_600) / 60;
+    let mut uptime_parts = Vec::new();
+    if days > 0 {
+        uptime_parts.push(format!("{}d", days));
+    }
+    if hours > 0 || !uptime_parts.is_empty() {
+        uptime_parts.push(format!("{}h", hours));
+    }
+    uptime_parts.push(format!("{}m", minutes));
+    uptime_parts.join(" ")
+}
+
+/// Report the first CPU's brand string and frequency (GHz).
+fn get_cpu_info(system: &System) -> Option<String> {
+    system.cpus().first().map(|cpu| {
+        let brand = cpu.brand();
+        let frequency_mhz = cpu.frequency();
+        format!("CPU Model: {} @ {:.2} GHz", brand, frequency_mhz as f64 / 1000.0)
+    })
+}
+
+/// Determine a human-friendly OS label, with Linux distributions resolved via `/etc/os-release`.
+fn get_os_info() -> String {
+    if cfg!(target_os = "linux") {
+        get_linux_distribution().unwrap_or("Linux (Unknown Distro)".to_string())
+    } else if cfg!(target_os = "windows") {
+        "Windows".to_string()
+    } else if cfg!(target_os = "macos") {
+        "macOS".to_string()
+    } else {
+        "Unknown OS".to_string()
+    }
+}
+
+/// Load the TOML configuration and print it verbatim.
+fn print_config(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let content = fs::read_to_string(path)?;
+    let parsed: Value = toml::from_str(&content)?;
+    println!("{}", parsed);
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    print_config("src/.config.toml")?;
+
     let mut system = System::new_all();
     // Refresh system data
     system.refresh_all();
-    
-    // Get total memory in KB
-    let total_memory_bt = system.total_memory();
-    // Convert to MB or GB for better readability
-    let total_memory_kb = total_memory_bt / 1024;
-    let total_memory_mb = total_memory_kb / 1024;
-    let total_memory_gb = total_memory_mb / 1024;
-    
-    //get cpu average utils
-    if let Some(cpu) = system.cpus().first() {
-        let brand = cpu.brand();
-        let frequency_mhz = cpu.frequency(); // Frequency in MHz
-        println!("CPU Model: {} @ {:.2} GHz", brand, frequency_mhz as f64 / 1000.0);
+
+    // Hardware snapshot
+    if let Some(cpu_info) = get_cpu_info(&system) {
+        println!("{}", cpu_info);
     }
-    
-    // Get battery information
+
+    // Collect system-level facts before printing them together.
     let battery_info = get_battery_info()?;
-    
-// Get OS Info
-let os_info = if cfg!(target_os = "linux") {
-    get_linux_distribution().unwrap_or("Linux (Unknown Distro)".to_string())
-} else if cfg!(target_os = "windows") {
-    "Windows".to_string()
-} else if cfg!(target_os = "macos") {
-    "macOS".to_string()
-} else {
-    "Unknown OS".to_string()
-};
+    let os_info = get_os_info();
+    let uptime_string = format_uptime();
+    let total_memory_gb = get_total_memory_gb(&system);
 
-
-    println!("OS: {}
+    println!(
+        "OS: {}
+Uptime: {}
 Ram: {} Gb
 {}",
-        os_info,
-        total_memory_gb,
-        battery_info
+        os_info, uptime_string, total_memory_gb, battery_info
     );
-    
+
     Ok(())
 }
