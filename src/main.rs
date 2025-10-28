@@ -1,7 +1,9 @@
 use battery::{Manager, State};
+use serde::de::{self, Deserializer, Visitor};
+use serde::Deserialize;
+use std::fmt;
 use std::fs;
 use sysinfo::System;
-use toml::Value;
 
 /// Attempt to read the human-friendly distribution name from `/etc/os-release`.
 /// Falls back to `None` when the information is unavailable.
@@ -12,7 +14,7 @@ fn get_linux_distribution() -> Option<String> {
                 return Some(
                     line.trim_start_matches("PRETTY_NAME=")
                         .trim_matches('"')
-                        .to_string()
+                        .to_string(),
                 );
             }
         }
@@ -25,17 +27,17 @@ fn get_linux_distribution() -> Option<String> {
 fn get_battery_info() -> Result<String, Box<dyn std::error::Error>> {
     // Initialize battery manager
     let manager = Manager::new()?;
-    
+
     // Get batteries iterator
     let batteries = manager.batteries()?;
-    
+
     // Try to get the first battery
     for battery in batteries {
         let battery = battery?;
-        
+
         // Get percentage (0.0 to 1.0)
         let percentage = battery.state_of_charge().value * 100.0;
-        
+
         // Get battery state (charging, discharging, full, etc.)
         let state = match battery.state() {
             State::Charging => "Charging",
@@ -44,7 +46,7 @@ fn get_battery_info() -> Result<String, Box<dyn std::error::Error>> {
             State::Empty => "Empty",
             _ => "Unknown",
         };
-        
+
         // Get time to full/empty if available
         let time_string = if battery.state() == State::Charging {
             if let Some(time) = battery.time_to_full() {
@@ -69,10 +71,13 @@ fn get_battery_info() -> Result<String, Box<dyn std::error::Error>> {
         } else {
             String::new()
         };
-        
-        return Ok(format!("Battery: {}% ({}){}", percentage as u8, state, time_string));
+
+        return Ok(format!(
+            "Battery: {}% ({}){}",
+            percentage as u8, state, time_string
+        ));
     }
-    
+
     // No batteries found
     Ok("Battery: Not detected".to_string())
 }
@@ -107,7 +112,11 @@ fn get_cpu_info(system: &System) -> Option<String> {
     system.cpus().first().map(|cpu| {
         let brand = cpu.brand();
         let frequency_mhz = cpu.frequency();
-        format!("CPU Model: {} @ {:.2} GHz", brand, frequency_mhz as f64 / 1000.0)
+        format!(
+            "CPU Model: {} @ {:.2} GHz",
+            brand,
+            frequency_mhz as f64 / 1000.0
+        )
     })
 }
 
@@ -124,39 +133,108 @@ fn get_os_info() -> String {
     }
 }
 
-/// Load the TOML configuration and print it verbatim.
-fn print_config(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// Accept booleans or stringly booleans (e.g. "true") for convenience.
+fn bool_from_str_or_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct BoolVisitor;
+
+    impl<'de> Visitor<'de> for BoolVisitor {
+        type Value = bool;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a boolean or a boolean-like string")
+        }
+
+        fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+            Ok(value)
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            value
+                .parse::<bool>()
+                .map_err(|_| E::custom(format!("invalid boolean string: {}", value)))
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            self.visit_str(&value)
+        }
+    }
+
+    deserializer.deserialize_any(BoolVisitor)
+}
+
+/// User-configurable toggles under the `[Display]` heading.
+#[derive(Debug, Deserialize)]
+struct DisplayConfig {
+    #[serde(deserialize_with = "bool_from_str_or_bool")]
+    cpu_model: bool,
+    #[serde(deserialize_with = "bool_from_str_or_bool")]
+    os: bool,
+    #[serde(deserialize_with = "bool_from_str_or_bool")]
+    uptime: bool,
+    #[serde(deserialize_with = "bool_from_str_or_bool")]
+    ram: bool,
+    #[serde(deserialize_with = "bool_from_str_or_bool")]
+    battery: bool,
+}
+
+/// Wrapper for the whole `.config.toml` file so we can honor the `[Display]` table.
+#[derive(Debug, Deserialize)]
+struct Config {
+    #[serde(rename = "Display")]
+    display: DisplayConfig,
+}
+
+/// Read and deserialize the TOML configuration file.
+fn load_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(path)?;
-    let parsed: Value = toml::from_str(&content)?;
-    println!("{}", parsed);
-    Ok(())
+    Ok(toml::from_str(&content)?)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    print_config("src/.config.toml")?;
+    let config = load_config("src/.config.toml")?;
 
     let mut system = System::new_all();
     // Refresh system data
     system.refresh_all();
 
     // Hardware snapshot
-    if let Some(cpu_info) = get_cpu_info(&system) {
-        println!("{}", cpu_info);
+    if config.display.cpu_model {
+        if let Some(cpu_info) = get_cpu_info(&system) {
+            println!("{}", cpu_info);
+        }
     }
 
     // Collect system-level facts before printing them together.
-    let battery_info = get_battery_info()?;
-    let os_info = get_os_info();
-    let uptime_string = format_uptime();
-    let total_memory_gb = get_total_memory_gb(&system);
+    let mut report_lines = Vec::new();
 
-    println!(
-        "OS: {}
-Uptime: {}
-Ram: {} Gb
-{}",
-        os_info, uptime_string, total_memory_gb, battery_info
-    );
+    if config.display.os {
+        report_lines.push(format!("OS: {}", get_os_info()));
+    }
+
+    if config.display.uptime {
+        report_lines.push(format!("Uptime: {}", format_uptime()));
+    }
+
+    if config.display.ram {
+        report_lines.push(format!("Ram: {} Gb", get_total_memory_gb(&system)));
+    }
+
+    if config.display.battery {
+        report_lines.push(get_battery_info()?);
+    }
+
+    if !report_lines.is_empty() {
+        println!("{}", report_lines.join("\n"));
+    }
 
     Ok(())
 }

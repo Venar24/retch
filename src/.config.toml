@@ -1,0 +1,7 @@
+[Display]
+cpu_model = "true"
+os = "true"
+uptime = "true"
+ram = "true"
+battery = "true"
+
